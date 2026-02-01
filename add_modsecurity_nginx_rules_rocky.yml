@@ -1,0 +1,74 @@
+---
+- name: "[Rocky Linux] ModSecurity 커스텀 룰 배포 및 최적화"
+  hosts: rocky
+  become: yes
+
+  tasks:
+    # 1. 기존 main.conf 백업 및 새로운 main.conf 생성 (순서: Custom -> CRS)
+    - name: ModSecurity main.conf 설정 업데이트 (커스텀 룰 우선 배치)
+      copy:
+        dest: /etc/nginx/modsec/main.conf
+        backup: yes
+        content: |
+          Include /etc/nginx/modsec/modsecurity.conf
+          Include /etc/nginx/modsec/my_rules.conf
+          Include /etc/nginx/modsec/crs-setup.conf
+          Include /etc/nginx/modsec/coreruleset/rules/*.conf
+
+    # 2. 커스텀 룰 파일 생성 (에러 방지를 위한 빈 줄 및 형식 최적화)
+    - name: my_rules.conf 커스텀 룰 파일 생성
+      copy:
+        dest: /etc/nginx/modsec/my_rules.conf
+        content: |
+          # --- My Custom Rules (ID: 1000001+) ---
+
+          # [SQL Injection]
+          SecRule ARGS "@rx (?i)(union|select|insert|update|delete|drop|where|or\s+1\s*=\s*1)" \
+              "phase:2,id:1000001,deny,log,status:403,msg:'[custom] SQL Injection Detected'"
+
+          # [OS Command Injection]
+          SecRule ARGS "@rx (?i)(/etc/passwd|/bin/sh|/bin/bash|cmd\.exe|powershell|cat\s+|ls\s+)" \
+              "phase:2,id:1000002,deny,log,status:403,msg:'[custom] OS Command Injection Attempt'"
+
+          # [Brute Force - Counter Init]
+          SecAction "phase:1,id:1000003,nolog,pass,initcol:ip=%{REMOTE_ADDR}"
+
+          # [Brute Force - Detection]
+          SecRule REQUEST_FILENAME "@contains /login" \
+              "phase:2,id:1000004,chain,deny,status:403,log,msg:'[custom] Brute Force Attack Prevented'"
+              SecRule ip:LOGIN_COUNT "@gt 10"
+
+          # [Brute Force - Increment]
+          SecRule REQUEST_FILENAME "@contains /login" \
+              "phase:5,id:1000005,nolog,pass,setvar:ip.LOGIN_COUNT=+1,expirevar:ip.LOGIN_COUNT=60"
+
+          # [DDoS - Rate Limit Init]
+          SecAction "phase:1,id:1000006,nolog,pass,initcol:ip=%{REMOTE_ADDR}"
+
+          # [DDoS - Detection]
+          SecRule ip:REQUEST_RATE "@gt 100" \
+              "phase:1,id:1000007,deny,status:429,log,msg:'[custom] DDoS Attack Detected - Rate Limit Exceeded'"
+
+          # [DDoS - Increment]
+          SecAction "phase:5,id:1000008,nolog,pass,setvar:ip.REQUEST_RATE=+1,expirevar:ip.REQUEST_RATE=1"
+
+          # [Directory Traversal]
+          SecRule ARGS|REQUEST_FILENAME "@rx \.\./" \
+              "phase:2,id:1000009,deny,log,status:403,msg:'[custom] Directory Traversal Attack'"
+
+          # [Custom Keyword Test]
+          SecRule ARGS|REQUEST_URI "test" \
+              "phase:2,id:10000011,deny,status:403,msg:'[custom] Custom Rule Test Success!'"
+
+    # 3. Nginx 설정 테스트
+    - name: Nginx 설정 테스트 실행
+      command: nginx -t
+      register: nginx_check
+      ignore_errors: no
+
+    # 4. 테스트 성공 시 Nginx 재시작
+    - name: Nginx 재시작
+      service:
+        name: nginx
+        state: restarted
+      when: nginx_check.rc == 0
