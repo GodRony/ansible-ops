@@ -1,0 +1,49 @@
+---
+- name: "[Ubuntu Only] Suricata 커스텀 룰 배포"
+  hosts: ubuntu
+  become: yes
+
+  tasks:
+    # 1. rules 디렉토리가 없을 경우 생성
+    - name: rules 디렉토리 생성 확인
+      file:
+        path: /etc/suricata/rules
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: ansible_distribution == 'Ubuntu'
+
+    # 2. 커스텀 룰 파일 생성
+    - name: Suricata 로컬 룰 파일 생성
+      copy:
+        dest: /etc/suricata/rules/local.rules
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # --- My Custom Suricata Rules (Ubuntu) ---
+          alert icmp any any -> any any (msg:"[custom] ICMP Ping Detected"; sid:1000005; rev:1;)
+          alert tcp any any -> $HOME_NET 22 (msg:"[custom/IDS] SSH Brute Force Attempt Detected"; flow:established,to_server; detection_filter:track by_src, count 3, seconds 60; sid:2000001; rev:1;)
+          alert tcp any any -> $HOME_NET any (msg:"[custom/IDS] Nmap OS Detection Attempt"; flags:SFUP; sid:2000002; rev:1;)
+          alert tcp any any -> $HOME_NET any (msg:"[custom/IDS] Nmap Xmas Scan Detected"; flags:FPU; sid:2000003; rev:1;)
+          alert tcp any any -> $HOME_NET any (msg:"[custom/IDS] Nmap Null Scan Detected"; flags:0; sid:2000004; rev:1;)
+      when: ansible_distribution == 'Ubuntu'
+
+    # 3. suricata.yaml 파일에서 룰 경로 업데이트
+    - name: suricata.yaml의 default-rule-path 수정
+      lineinfile:
+        path: /etc/suricata/suricata.yaml
+        regexp: '^default-rule-path:'
+        line: 'default-rule-path: /etc/suricata/rules'
+      when: ansible_distribution == 'Ubuntu'
+
+
+    - name: Suricata 서비스 재시작
+      service:
+        name: suricata
+        state: restarted
+      when: 
+        - ansible_distribution == 'Ubuntu'
+        - suricata_check is defined
+        - suricata_check.rc == 0
