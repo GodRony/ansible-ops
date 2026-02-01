@@ -1,0 +1,73 @@
+---
+- name: Install Suricata on Ubuntu
+  hosts: ubuntu
+  become: yes
+
+  vars:
+    suricata_interface: ens33
+    home_net: "[172.16.0.0/16,192.168.0.0/24,192.168.56.0/24]"
+    local_rule_path: /etc/suricata/rules/local.rules
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name: software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Add Suricata stable PPA
+      apt_repository:
+        repo: ppa:oisf/suricata-stable
+        state: present
+
+    - name: Install Suricata
+      apt:
+        name: suricata
+        state: present
+
+
+    - name: Update Suricata rules
+      command: suricata-update
+      changed_when: false
+
+    - name: Create local rules directory
+      file:
+        path: /etc/suricata/rules
+        state: directory
+        mode: '0755'
+
+    - name: Create local.rules
+      copy:
+        dest: "{{ local_rule_path }}"
+        content: |
+          alert icmp any any -> any any (msg:"ICMP Ping Detected"; sid:1000005; rev:1;)
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Configure rule-files in suricata.yaml
+      blockinfile:
+        path: /etc/suricata/suricata.yaml
+        marker: "# {mark} ANSIBLE RULES"
+        block: |
+          rule-files:
+            - suricata.rules
+            - /etc/suricata/rules/local.rules
+
+    - name: Configure af-packet interface
+      replace:
+        path: /etc/suricata/suricata.yaml
+        regexp: 'interface:\s*\w+'
+        replace: 'interface: {{ suricata_interface }}'
+
+    - name: Configure HOME_NET
+      replace:
+        path: /etc/suricata/suricata.yaml
+        regexp: 'HOME_NET:\s*".*?"'
+        replace: 'HOME_NET: "{{ home_net }}"'
+
+    - name: Restart Suricata
+      systemd:
+        name: suricata
+        state: restarted
+

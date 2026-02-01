@@ -1,0 +1,39 @@
+---
+- name: Install and configure nginx safely
+  hosts: all
+  become: yes
+
+  vars:
+    apache_service: >-
+      {{ 'httpd'
+         if ansible_facts['os_family'] == 'RedHat'
+         else 'apache2' }}
+
+  tasks:
+    # 1️⃣ nginx 설치
+    - name: Install nginx
+      package:
+        name: nginx
+        state: present
+
+    # 2️⃣ Apache가 있으면 중지 (포트 80 충돌 방지)
+    - name: Stop Apache if exists
+      systemd:
+        name: "{{ apache_service }}"
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    # 3️⃣ nginx 설정 문법 검사
+    - name: Test nginx configuration
+      command: nginx -t
+      changed_when: false
+
+    # 4️⃣ nginx 시작 및 활성화
+    - name: Start and enable nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+

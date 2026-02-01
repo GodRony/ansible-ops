@@ -1,0 +1,136 @@
+---
+- name: Rocky Linux Nginx ModSecurity Source Build (ONLY)
+  hosts: all
+  become: yes
+
+  tasks:
+    # [제한 조건] RedHat(Rocky) 계열이 아니면 이 플레이북의 모든 작업을 중단
+    - name: Check if the OS is Rocky/RedHat
+      meta: end_host
+      when: ansible_facts['os_family'] != "RedHat"
+
+    # 1. 필수 의존성 라이브러리 설치 (dnf groupinstall 및 개별 패키지)
+# 1. 저장소 확장 및 CRB 활성화 (이 부분이 빠지면 devel 패키지를 못 찾습니다)
+    - name: Enable EPEL and CRB repository
+      shell: |
+        dnf install -y epel-release
+        dnf config-manager --set-enabled crb
+      when: ansible_facts['os_family'] == "RedHat"
+
+    # 2. 필수 의존성 라이브러리 설치 (이제 정상적으로 찾아집니다)
+    - name: Install Development Tools and Dependencies
+      dnf:
+        name:
+          - "@Development Tools"
+          - git
+          - gd-devel
+          - perl-ExtUtils-Embed
+          - libcurl-devel
+          - openssl-devel
+          - pcre-devel
+          - libxml2-devel
+          - yajl-devel        # 이제 crb에서 찾음
+          - lua-devel         # 이제 crb에서 찾음
+          - lmdb-devel        # 이제 crb에서 찾음
+          - libtool
+          - autoconf
+          - libmaxminddb-devel # 이제 crb에서 찾음
+          - wget
+        state: present
+
+    # 2. ModSecurity 본체 빌드 (libmodsecurity)
+    - name: Clone ModSecurity v3
+      git:
+        repo: https://github.com/SpiderLabs/ModSecurity
+        dest: /opt/ModSecurity
+        version: v3/master
+        depth: 1
+        recursive: yes
+
+    - name: Build and Install Libmodsecurity
+      shell: |
+        ./build.sh
+        ./configure
+        make -j$(nproc)
+        make install
+      args:
+        chdir: /opt/ModSecurity
+        creates: /usr/local/modsecurity/lib/libmodsecurity.so
+
+    # 3. Nginx 버전 확인 및 소스 다운로드
+    - name: Get Nginx version
+      shell: nginx -v 2>&1 | cut -d '/' -f 2
+      register: nginx_ver
+      changed_when: false
+
+    - name: Download Nginx Source
+      get_url:
+        url: "http://nginx.org/download/nginx-{{ nginx_ver.stdout }}.tar.gz"
+        dest: "/opt/nginx-{{ nginx_ver.stdout }}.tar.gz"
+
+    - name: Clone ModSecurity-nginx connector
+      git:
+        repo: https://github.com/SpiderLabs/ModSecurity-nginx.git
+        dest: /opt/ModSecurity-nginx
+        depth: 1
+
+    # 4. 동적 모듈(.so) 컴파일 및 복사
+    - name: Compile ModSecurity Module
+      shell: |
+        tar zxvf nginx-{{ nginx_ver.stdout }}.tar.gz
+        cd nginx-{{ nginx_ver.stdout }}/
+        ./configure --with-compat --add-dynamic-module=../ModSecurity-nginx
+        make modules
+        cp objs/ngx_http_modsecurity_module.so /usr/share/nginx/modules/
+      args:
+        chdir: /opt
+        creates: /usr/share/nginx/modules/ngx_http_modsecurity_module.so
+
+    # 5. Nginx 설정 파일 수정 (모듈 로드 및 IPS 설정)
+    - name: Load ModSecurity Module in nginx.conf
+      lineinfile:
+        path: /etc/nginx/nginx.conf
+        insertbefore: BOF
+        line: "load_module modules/ngx_http_modsecurity_module.so;"
+
+    - name: Create ModSec directories and copy configs
+      shell: |
+        mkdir -p /etc/nginx/modsec
+        cp /opt/ModSecurity/modsecurity.conf-recommended /etc/nginx/modsec/modsecurity.conf
+        cp /opt/ModSecurity/unicode.mapping /etc/nginx/modsec/
+
+    - name: Set ModSecurity to IPS Mode (On)
+      lineinfile:
+        path: /etc/nginx/modsec/modsecurity.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^SecRuleEngine', line: 'SecRuleEngine On' }
+        - { regexp: '^SecRequestBodyAccess', line: 'SecRequestBodyAccess On' }
+        - { regexp: '^SecAuditEngine', line: 'SecAuditEngine On' }
+
+    # 6. OWASP CRS 설정 및 메인 설정 파일 생성
+    - name: Clone OWASP CRS
+      git:
+        repo: https://github.com/coreruleset/coreruleset.git
+        dest: /etc/nginx/modsec/coreruleset
+
+    - name: Setup main.conf and CRS config
+      shell: |
+        cp /etc/nginx/modsec/coreruleset/crs-setup.conf.example /etc/nginx/modsec/crs-setup.conf
+        echo 'Include /etc/nginx/modsec/modsecurity.conf' > /etc/nginx/modsec/main.conf
+        echo 'Include /etc/nginx/modsec/crs-setup.conf' >> /etc/nginx/modsec/main.conf
+        echo 'Include /etc/nginx/modsec/coreruleset/rules/*.conf' >> /etc/nginx/modsec/main.conf
+
+    - name: Apply ModSecurity to Nginx default server block
+      blockinfile:
+        path: /etc/nginx/nginx.conf
+        insertafter: 'http {'
+        block: |
+                modsecurity on;
+                modsecurity_rules_file /etc/nginx/modsec/main.conf;
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted

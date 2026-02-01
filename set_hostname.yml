@@ -1,0 +1,27 @@
+---
+- name: Set hostname
+  hosts: all
+  become: yes
+
+  vars:
+    new_hostname: "{{ hostname | default('localhost') }}"
+
+
+  tasks:
+    - name: Set system hostname
+      hostname:
+        name: "{{ new_hostname }}"
+
+    - name: Apply hostname immediately
+      command: hostnamectl set-hostname "{{ new_hostname }}"
+      changed_when: false
+
+    - name: Show current hostname
+      command: hostname
+      register: hostname_result
+      changed_when: false
+
+    - name: Debug hostname
+      debug:
+        var: hostname_result.stdout
+

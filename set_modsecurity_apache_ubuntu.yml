@@ -1,0 +1,95 @@
+---
+- name: Install Apache2 + ModSecurity 3 on Ubuntu
+  hosts: all
+  become: yes
+  vars:
+    modsec_path: /opt/ModSecurity
+    modsec_apache_path: /opt/ModSecurity-apache
+
+  tasks:
+
+  - name: Ensure Python3-apt is installed
+    ansible.builtin.raw: |
+      if ! command -v python3 >/dev/null; then
+        apt update && apt install -y python3 python3-apt
+      fi
+    changed_when: false
+
+  - name: Stop and disable Nginx if installed
+    ansible.builtin.systemd:
+      name: nginx
+      state: stopped
+      enabled: no
+    ignore_errors: yes
+
+  - name: Install Apache2
+    ansible.builtin.apt:
+      name: apache2
+      state: present
+      update_cache: yes
+
+  - name: Install required packages for ModSecurity build
+    ansible.builtin.apt:
+      name:
+        - build-essential
+        - git
+        - autoconf
+        - automake
+        - libtool
+        - pkg-config
+        - libpcre3-dev
+        - libxml2-dev
+        - libcurl4-openssl-dev
+        - libyajl-dev
+        - liblua5.4-dev
+        - liblmdb-dev
+        - libssl-dev
+        - libgeoip-dev
+      state: present
+      update_cache: yes
+
+  - name: Clone ModSecurity 3 repository
+    ansible.builtin.git:
+      repo: https://github.com/SpiderLabs/ModSecurity
+      dest: "{{ modsec_path }}"
+      version: v3/master
+      depth: 1
+      update: yes
+
+  - name: Initialize and update submodules
+    ansible.builtin.command: git submodule update --init --recursive
+    args:
+      chdir: "{{ modsec_path }}"
+
+  - name: Build and install ModSecurity 3
+    ansible.builtin.shell: |
+      ./build.sh
+      ./configure
+      make -j$(nproc)
+      sudo make install
+    args:
+      chdir: "{{ modsec_path }}"
+
+  - name: Clone Apache connector for ModSecurity
+    ansible.builtin.git:
+      repo: https://github.com/SpiderLabs/ModSecurity-apache.git
+      dest: "{{ modsec_apache_path }}"
+      depth: 1
+      update: yes
+
+  - name: Build and install Apache ModSecurity module
+    ansible.builtin.shell: |
+      sudo apt install -y apache2-dev
+      apxs2 -i -a -c mod_security2.c
+    args:
+      chdir: "{{ modsec_apache_path }}"
+
+  - name: Enable Apache ModSecurity module
+    ansible.builtin.command: a2enmod security2
+    ignore_errors: yes
+
+  - name: Restart Apache2
+    ansible.builtin.systemd:
+      name: apache2
+      state: restarted
+
