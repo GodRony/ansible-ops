@@ -1,23 +1,22 @@
 ---
 - name: Rocky Linux Nginx ModSecurity Source Build (ONLY)
-  hosts: all
+  hosts: ansible_r
   become: yes
 
   tasks:
-    # [제한 조건] RedHat(Rocky) 계열이 아니면 이 플레이북의 모든 작업을 중단
-    - name: Check if the OS is Rocky/RedHat
-      meta: end_host
-      when: ansible_facts['os_family'] != "RedHat"
 
     # 1. 필수 의존성 라이브러리 설치 (dnf groupinstall 및 개별 패키지)
-# 1. 저장소 확장 및 CRB 활성화 (이 부분이 빠지면 devel 패키지를 못 찾습니다)
-    - name: Enable EPEL and CRB repository
-      shell: |
-        dnf install -y epel-release
-        dnf config-manager --set-enabled crb
-      when: ansible_facts['os_family'] == "RedHat"
+    - name: Install EPEL release 
+      dnf :
+        name: epel-release
+        state: present
 
-    # 2. 필수 의존성 라이브러리 설치 (이제 정상적으로 찾아집니다)
+    # 2. CRB 저장소 활성화
+    - name: Enable CRB repositroty
+      shell: |
+        dnf config-manager --set-enabled crb
+
+    # 3. 필수 의존성 라이브러리 설치 (이제 정상적으로 찾아집니다)
     - name: Install Development Tools and Dependencies
       dnf:
         name:
@@ -38,43 +37,48 @@
           - wget
         state: present
 
-    # 2. ModSecurity 본체 빌드 (libmodsecurity)
+    # 4. ModSecurity 설치
     - name: Clone ModSecurity v3
       git:
         repo: https://github.com/SpiderLabs/ModSecurity
-        dest: /opt/ModSecurity
+        dest: /opt/ModSecurity #/opt 폴더는 있지만 ModSecurity폴더가 없어도 자동생성
         version: v3/master
         depth: 1
         recursive: yes
+        # git clone을 하고 자동으로 git submodule을 하고 update --init --recursive 실행함
 
+    # 5. ModSecurity 빌드  
     - name: Build and Install Libmodsecurity
       shell: |
         ./build.sh
         ./configure
         make -j$(nproc)
         make install
-      args:
+      args: # shell명령 실행 이전에 먼저 실행되는 환경 값 
         chdir: /opt/ModSecurity
         creates: /usr/local/modsecurity/lib/libmodsecurity.so
+        # 사전검사 creates로 위의 파일이 있다면 shell 명령어를 실행하지 않음.
+        # 그리고 빌드를 하면 저 폴더에 libmodsecurity.so가 생김.
 
-    # 3. Nginx 버전 확인 및 소스 다운로드
+    # 6. ModSecurity-nginx 가져오기1 + 버전 확인
     - name: Get Nginx version
       shell: nginx -v 2>&1 | cut -d '/' -f 2
-      register: nginx_ver
-      changed_when: false
+      register: nginx_ver #위의 shell결과를nginx_ver  변수로 등록하겠다.
+      changed_when: false #확인만 했으니까 변경은 반영하지 않겠다.
 
-    - name: Download Nginx Source
+    - name: Get ModSecurity-nginx by nignx -v
       get_url:
         url: "http://nginx.org/download/nginx-{{ nginx_ver.stdout }}.tar.gz"
         dest: "/opt/nginx-{{ nginx_ver.stdout }}.tar.gz"
 
-    - name: Clone ModSecurity-nginx connector
+    # 7.  ModSecurity-nginx 가져오기2
+    - name: Get ModSecurity-nginx by clon
       git:
         repo: https://github.com/SpiderLabs/ModSecurity-nginx.git
         dest: /opt/ModSecurity-nginx
         depth: 1
 
-    # 4. 동적 모듈(.so) 컴파일 및 복사
+    # 8. 동적 모듈(.so) 컴파일 및 복사
     - name: Compile ModSecurity Module
       shell: |
         tar zxvf nginx-{{ nginx_ver.stdout }}.tar.gz
@@ -86,7 +90,7 @@
         chdir: /opt
         creates: /usr/share/nginx/modules/ngx_http_modsecurity_module.so
 
-    # 5. Nginx 설정 파일 수정 (모듈 로드 및 IPS 설정)
+    # 9. Nginx 설정 파일 수정 (모듈 로드 및 IPS 설정)
     - name: Load ModSecurity Module in nginx.conf
       lineinfile:
         path: /etc/nginx/nginx.conf
@@ -109,7 +113,7 @@
         - { regexp: '^SecRequestBodyAccess', line: 'SecRequestBodyAccess On' }
         - { regexp: '^SecAuditEngine', line: 'SecAuditEngine On' }
 
-    # 6. OWASP CRS 설정 및 메인 설정 파일 생성
+    # 10. OWASP CRS 설정 및 메인 설정 파일 생성
     - name: Clone OWASP CRS
       git:
         repo: https://github.com/coreruleset/coreruleset.git
