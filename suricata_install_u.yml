@@ -1,73 +1,85 @@
 ---
-- name: Install Suricata on Ubuntu
-  hosts: ubuntu
+- name: Suricata Installation and Custom Configuration
+  hosts: suricata_u
   become: yes
-
   vars:
-    suricata_interface: ens33
-    home_net: "[172.16.0.0/16,192.168.0.0/24,192.168.56.0/24]"
-    local_rule_path: /etc/suricata/rules/local.rules
+    # 인벤토리에서 가져온 변수 활용
+    suricata_interface: "{{ NIC }}"
+    home_net_range: "[{{ NI }}]"
 
   tasks:
-    - name: Install required packages
-      apt:
-        name: software-properties-common
-        state: present
+    # 0. PPA 설치
+    - name: Add PPA (엔터 자동입력 및 에러 무시)
+      shell: |
+        yes "" | add-apt-repository ppa:oisf/suricata-stable
+        apt-get update || true  # <--- 업데이트 실패해도 무조건 '성공'한 걸로 속임
+      ignore_errors: yes
+
+    # 1. 자물쇠가 풀릴 때까지 최대 5분간 대기 (자동 업데이트 방해 방지)
+    - name: Wait for APT lock
+      ansible.builtin.shell: |
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+          sleep 5
+        done
+      timeout: 300
+
+    # 2. 패키지 목록 업데이트 (apt update)
+    - name: Update apt cache
+      ansible.builtin.apt:
         update_cache: yes
+      ignore_errors: yes  # 404 에러(PPA 버전 문제)가 나더라도 일단 진행하도록 설정
 
-    - name: Add Suricata stable PPA
-      apt_repository:
-        repo: ppa:oisf/suricata-stable
-        state: present
-
+    # 3. Suricata 설치
     - name: Install Suricata
-      apt:
+      ansible.builtin.apt:
         name: suricata
         state: present
+        update_cache: no  # 위에서 이미 했으므로 여기선 생략    
 
-
-    - name: Update Suricata rules
-      command: suricata-update
-      changed_when: false
-
+    # 3. 로컬 룰 디렉토리 생성
     - name: Create local rules directory
       file:
         path: /etc/suricata/rules
         state: directory
         mode: '0755'
 
-    - name: Create local.rules
+    # 4. 로컬 룰 파일 생성 (vi 대신 직접 내용을 넣음)
+    - name: Create local.rules with custom rules
       copy:
-        dest: "{{ local_rule_path }}"
+        dest: /etc/suricata/rules/local.rules
         content: |
-          alert icmp any any -> any any (msg:"ICMP Ping Detected"; sid:1000005; rev:1;)
-        owner: root
-        group: root
-        mode: '0644'
+          alert icmp any any -> any any (msg:"[custom] ICMP Ping Detected"; sid:1000005; rev:1;)
 
-    - name: Configure rule-files in suricata.yaml
-      blockinfile:
-        path: /etc/suricata/suricata.yaml
-        marker: "# {mark} ANSIBLE RULES"
-        block: |
-          rule-files:
-            - suricata.rules
-            - /etc/suricata/rules/local.rules
-
-    - name: Configure af-packet interface
+     # 5. suricata 설정파일 변경
+    - name: Update Suricata Interface (af-packet)
       replace:
         path: /etc/suricata/suricata.yaml
-        regexp: 'interface:\s*\w+'
-        replace: 'interface: {{ suricata_interface }}'
+        # '  - interface: ' 뒤에 오는 단어(\w+)를 찾아서 교체합니다.
+        regexp: '(?<=interface: )\w+'
+        replace: "{{ suricata_interface }}"
 
-    - name: Configure HOME_NET
+
+    - name: Update HOME_NET
       replace:
         path: /etc/suricata/suricata.yaml
-        regexp: 'HOME_NET:\s*".*?"'
-        replace: 'HOME_NET: "{{ home_net }}"'
+        # HOME_NET: 뒤에 오는 값을 인벤토리 변수로 교체
+        regexp: 'HOME_NET:.*'
+        replace: 'HOME_NET: "{{ home_net_range }}"'      
 
-    - name: Restart Suricata
+    # 6. 룰셋 추가 
+    - name: Add local.rules to rule-files list
+      lineinfile:
+        path: /etc/suricata/suricata.yaml
+        insertafter: '- suricata.rules'
+        line: '  - /etc/suricata/rules/local.rules'
+    
+    # 7. 서비스 시작 및 활성화 (여유 있게 기다려주기)
+    - name: Start and enable Suricata
       systemd:
         name: suricata
         state: restarted
-
+        enabled: yes
+      register: suricata_start
+      until: suricata_start is success
+      retries: 5       # 최대 5번까지 다시 시도
+      delay: 10        # 한 번 시도 후 10초 대기 (Suricata가 룰 읽을 시간)
